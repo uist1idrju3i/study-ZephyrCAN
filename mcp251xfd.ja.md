@@ -87,7 +87,7 @@ Devicetree バインディング: `dts/bindings/can/microchip,mcp251xfd.yaml`
 | `CONFIG_CAN_MCP251XFD_MAX_TX_QUEUE` | int | 8 | 1--32 | TX キューのメッセージ数。送信コールバックポインタ、セマフォの配列サイズおよび TEF FIFO の深さも決定します。 |
 | `CONFIG_CAN_MCP251XFD_RX_FIFO_ITEMS` | int | 16 | 1--32 | RX FIFO の CAN メッセージ数。MCP251XFD チップ上の RAM 使用量に直接影響します。 |
 | `CONFIG_CAN_MCP251XFD_INT_THREAD_STACK_SIZE` | int | 768 | -- | 割り込みハンドラスレッドのスタックサイズ（バイト）。 |
-| `CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO` | int | 2 | -- | 割り込みハンドラスレッドの優先度。数値が大きいほど優先度が高くなります。スレッドは協調型（yield するまでプリエンプトされません）です。 |
+| `CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO` | int | 2 | -- | 割り込みハンドラスレッドの優先度。Zephyr では非負の値が小さいほど優先度が高いプリエンプティブスレッドになります。負の値は協調型スレッドを指定します。デフォルト値 2 はプリエンプティブスレッドを生成します。割り込み処理の決定論的なレイテンシが必要な場合は、負の値（例: -1）を使用して協調型スレッドにすることを検討してください。 |
 | `CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES` | int | 5 | -- | SFR レジスタ読み出し時に CRC チェックが失敗した場合のリトライ回数。 |
 | `CONFIG_CAN_MAX_FILTER` | int | 5 | 1--32 | `can_add_rx_filter()` でサポートされる同時アクティブ RX フィルタの最大数。注: `CAN_MCP251XFD` Kconfig スコープ内で定義されていますが、汎用的な名前を使用しています。 |
 
@@ -373,54 +373,43 @@ MCP251XFD ノードは SPI バス上に配置され、標準的な SPI デバイ
 
 ### アーキテクチャ
 
-```
-+---------------------+          SPI Bus          +-------------------+
-|                     |  MOSI/MISO/SCK/CS/INT     |                   |
-|    Host MCU         | <-----------------------> |   MCP251XFD       |
-|                     |                            |                   |
-|  +---------------+  |                            |  +-------------+  |
-|  | Zephyr App    |  |                            |  | CAN FD Core |  |
-|  +-------+-------+  |                            |  +------+------+  |
-|          |           |                            |         |         |
-|  +-------v-------+  |                            |  +------v------+  |
-|  | CAN API       |  |                            |  | 2 KB RAM    |  |
-|  | (can.h)       |  |                            |  | TEF|TXQ|RXF |  |
-|  +-------+-------+  |                            |  +-------------+  |
-|          |           |                            |         |         |
-|  +-------v-------+  |                            |  +------v------+  |
-|  | MCP251XFD     |  |   SPI Read/Write/CRC       |  | SPI Slave   |  |
-|  | Driver        +--+--------------------------->|  | Interface   |  |
-|  +-------+-------+  |                            |  +-------------+  |
-|          |           |                            |                   |
-|  +-------v-------+  |        GPIO (INT)          |  INT pin          |
-|  | INT Thread    |<-+----------------------------+  (active-low)     |
-|  | (cooperative) |  |                            |                   |
-|  +---------------+  |                            +-------------------+
-+---------------------+                            CAN H/L to Bus
+```mermaid
+flowchart LR
+    subgraph HOST["Host MCU"]
+        APP["Zephyr App"]
+        API["CAN API\n(can.h)"]
+        DRV["MCP251XFD\nDriver"]
+        INT_THREAD["INT Thread\n(cooperative)"]
+        APP --> API --> DRV
+        DRV --> INT_THREAD
+    end
+    subgraph CHIP["MCP251XFD"]
+        SPI_IF["SPI Slave\nInterface"]
+        RAM["2 KB RAM\nTEF | TXQ | RXF"]
+        CORE["CAN FD Core"]
+        INT_PIN["INT Pin\n(active-low)"]
+        SPI_IF --> RAM --> CORE
+        CORE --> INT_PIN
+    end
+    DRV -- "SPI Read/Write/CRC" --> SPI_IF
+    INT_PIN -- "GPIO (level-triggered)" --> INT_THREAD
+    CORE --> BUS["CAN Bus\n(CANH / CANL)"]
 ```
 
 ### RAM レイアウト
 
 MCP251XFD はアドレス `0x400` から始まる **2048 バイト**のオンチップ RAM を持ちます。この RAM はコンパイル時に 3 つの FIFO 領域に分割されます:
 
-```
-Address 0x400
-+----------------------------------------------+
-|  TEF FIFO (Transmit Event FIFO)              |  Offset 0x000
-|  Items = CONFIG_CAN_MCP251XFD_MAX_TX_QUEUE   |
-|  Item size = 8 bytes                         |
-+----------------------------------------------+
-|  TX Queue                                    |
-|  Items = CONFIG_CAN_MCP251XFD_MAX_TX_QUEUE   |
-|  Item size = 8 + PAYLOAD_SIZE bytes           |
-+----------------------------------------------+
-|  RX FIFO                                     |
-|  Items = CONFIG_CAN_MCP251XFD_RX_FIFO_ITEMS  |
-|  Item size = 8 + PAYLOAD_SIZE (+ 4 if TS)    |
-+----------------------------------------------+
-|  (Unused remainder)                          |
-+----------------------------------------------+
-Address 0xBFF (end of 2 KB)
+```mermaid
+flowchart TD
+    subgraph RAM["MCP251XFD On-Chip RAM (2048 bytes: 0x400 - 0xBFF)"]
+        direction TB
+        TEF["TEF FIFO\nItems = MAX_TX_QUEUE\nItem size = 8 bytes"]
+        TXQ["TX Queue\nItems = MAX_TX_QUEUE\nItem size = 8 + PAYLOAD_SIZE bytes"]
+        RXF["RX FIFO\nItems = RX_FIFO_ITEMS\nItem size = 8 + PAYLOAD_SIZE (+ 4 if timestamp)"]
+        UNUSED["Unused Remainder"]
+        TEF --- TXQ --- RXF --- UNUSED
+    end
 ```
 
 **主要定数:**
@@ -479,6 +468,22 @@ Address 0xBFF (end of 2 KB)
 - **SPI ワードサイズ:** 8 ビット（インスタンシエーションマクロの `SPI_WORD_SET(8)` で設定）
 - **Read CRC リトライ回数:** `CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES`（デフォルト: 5）で制御
 
+```mermaid
+flowchart LR
+    subgraph READ["Standard Read (opcode 0b0011)"]
+        direction LR
+        R_CMD["Command\n2 bytes\n(opcode + addr)"] --> R_DATA["Data\nN bytes"]
+    end
+    subgraph READ_CRC["Read with CRC (opcode 0b1011)"]
+        direction LR
+        RC_CMD["Command\n2 bytes"] --> RC_LEN["Length\n1 byte"] --> RC_DATA["Data\nN bytes"] --> RC_CRC["CRC-16\n2 bytes"]
+    end
+    subgraph WRITE["Standard Write (opcode 0b0010)"]
+        direction LR
+        W_CMD["Command\n2 bytes\n(opcode + addr)"] --> W_DATA["Data\nN bytes"]
+    end
+```
+
 ### 割り込み処理
 
 MCP251XFD は**レベルトリガ、アクティブロー**の割り込み出力を使用します:
@@ -494,6 +499,29 @@ MCP251XFD は**レベルトリガ、アクティブロー**の割り込み出力
    - **RXOVIF** -- RX オーバーフロー割り込み -- `CONFIG_CAN_STATS` 設定時のみ有効
 
 3. 処理後、スレッドはレベルトリガ GPIO 割り込みを**再有効化**します。
+
+```mermaid
+flowchart TD
+    INT_LOW["MCP251XFD INT pin\ngoes LOW"] --> GPIO_CB["GPIO callback fires"]
+    GPIO_CB --> DISABLE["Disable further\nGPIO interrupts"]
+    DISABLE --> SIGNAL["k_sem_give(&int_sem)"]
+    SIGNAL --> THREAD["INT thread wakes\n(k_sem_take)"]
+    THREAD --> READ["Read interrupt flags\nvia SPI"]
+    READ --> RXIF{"RXIF?"}
+    RXIF -->|Yes| RX_PROC["Read RX FIFO\nDispatch to filter callbacks"]
+    RXIF -->|No| TEFIF
+    RX_PROC --> TEFIF{"TEFIF?"}
+    TEFIF -->|Yes| TEF_PROC["Read TEF\nInvoke TX completion callbacks"]
+    TEFIF -->|No| MODIF
+    TEF_PROC --> MODIF{"MODIF?"}
+    MODIF -->|Yes| MOD_PROC["Handle mode change"]
+    MODIF -->|No| CERRIF
+    MOD_PROC --> CERRIF{"CERRIF?"}
+    CERRIF -->|Yes| ERR_PROC["Handle CAN errors\n(bus-off, error-passive, etc.)"]
+    CERRIF -->|No| DONE
+    ERR_PROC --> DONE["Re-enable GPIO\ninterrupts"]
+    DONE --> THREAD
+```
 
 > **重要:** ホスト MCU の GPIO コントローラは**レベルトリガ割り込み**（`GPIO_INT_LEVEL_ACTIVE`）を**サポートする必要があります**。エッジトリガ割り込みでは、MCP251XFD が最初の割り込みが応答される前に別の割り込みをアサートした場合、イベントの取りこぼしが発生する可能性があります。
 
@@ -522,6 +550,23 @@ MCP251XFD は**レベルトリガ、アクティブロー**の割り込み出力
     - RX FIFO（深さ = `RX_FIFO_ITEMS`、ペイロード = `PAYLOAD_SIZE`、タイムスタンプはオプション）
 11. ノミナルビットタイミングの適用（CAN FD の場合はデータビットタイミングも）
 
+```mermaid
+flowchart TD
+    START(["mcp251xfd_init()"]) --> CLK["Enable external clock\n(if clocks property exists)"]
+    CLK --> SEM["Initialize semaphores\n(int_sem, tx_sem) and mutex"]
+    SEM --> CHK["Verify SPI bus and\nGPIO port readiness"]
+    CHK --> GPIO["Configure INT GPIO\n(level-triggered interrupt)"]
+    GPIO --> THREAD["Start interrupt\nhandler thread"]
+    THREAD --> RESET["Reset MCP251XFD\nvia SPI"]
+    RESET --> VERIFY{"Configuration\nmode?"}
+    VERIFY -->|No| ERR(["Return error"])
+    VERIFY -->|Yes| TIMING["Calculate bit timing\nfrom DT properties"]
+    TIMING --> REGS["Initialize registers\n(CON, OSC, IOCON, INT, TDC, TSCON)"]
+    REGS --> FIFO["Initialize FIFOs\n(TEF, TX Queue, RX FIFO)"]
+    FIFO --> BT["Apply bit timing\n(nominal + data)"]
+    BT --> DONE(["Init complete\n(Configuration mode)"])
+```
+
 ### 動作モードマッピング
 
 ドライバは Zephyr CAN モードを MCP251XFD ハードウェアモードにマッピングします:
@@ -536,6 +581,24 @@ MCP251XFD は**レベルトリガ、アクティブロー**の割り込み出力
 | `CAN_MODE_ONE_SHOT` | -- | 非サポート（`-ENOTSUP`） |
 
 > コンフィギュレーションモードから Mixed（CAN FD）モードに切り替える際、送信遅延補償（TDC）が自動モードで自動的に有効化されます。CAN 2.0 またはループバックモードに切り替える場合、TDC は無効化されます。
+
+```mermaid
+stateDiagram-v2
+    [*] --> Configuration : "Power-on / Reset"
+    Configuration --> CAN2_0 : "can_start()\n(CAN_MODE_NORMAL)"
+    Configuration --> Mixed : "can_start()\n(CAN_MODE_FD)"
+    Configuration --> ListenOnly : "can_start()\n(CAN_MODE_LISTENONLY)"
+    Configuration --> ExtLoopback : "can_start()\n(CAN_MODE_LOOPBACK)"
+    CAN2_0 --> Configuration : "can_stop()"
+    Mixed --> Configuration : "can_stop()"
+    ListenOnly --> Configuration : "can_stop()"
+    ExtLoopback --> Configuration : "can_stop()"
+
+    note right of Mixed
+        TDC auto-enabled
+        when entering this mode
+    end note
+```
 
 ### データ構造体
 
