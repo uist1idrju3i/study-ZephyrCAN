@@ -60,6 +60,9 @@ static const struct device *const can_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_canbu
 /** Semaphore used to wait for TX completion inside the send helper */
 static K_SEM_DEFINE(tx_sem, 0, 1);
 
+/** Error status reported by the TX callback (written in ISR context) */
+static volatile int tx_callback_error;
+
 /* ------------------------------------------------------------------ */
 /* Statistics counters                                                 */
 /* ------------------------------------------------------------------ */
@@ -194,10 +197,14 @@ static void can_rx_callback(const struct device *dev,
 
         LOG_INF("RX: ID=0x%03X DLC=%u data=[%02X %02X %02X %02X %02X %02X %02X %02X]",
                 frame->id, frame->dlc,
-                frame->data[0], frame->data[1],
-                frame->data[2], frame->data[3],
-                frame->data[4], frame->data[5],
-                frame->data[6], frame->data[7]);
+                (frame->dlc > 0U) ? frame->data[0] : 0U,
+                (frame->dlc > 1U) ? frame->data[1] : 0U,
+                (frame->dlc > 2U) ? frame->data[2] : 0U,
+                (frame->dlc > 3U) ? frame->data[3] : 0U,
+                (frame->dlc > 4U) ? frame->data[4] : 0U,
+                (frame->dlc > 5U) ? frame->data[5] : 0U,
+                (frame->dlc > 6U) ? frame->data[6] : 0U,
+                (frame->dlc > 7U) ? frame->data[7] : 0U);
 }
 
 /**
@@ -215,9 +222,10 @@ static void can_tx_callback(const struct device *dev, int error,
         ARG_UNUSED(dev);
         ARG_UNUSED(user_data);
 
+        tx_callback_error = error;
+
         if (error != 0) {
                 LOG_ERR("TX callback error: %d", error);
-                tx_error_count++;
         }
 
         k_sem_give(&tx_sem);
@@ -304,10 +312,11 @@ static int can_send_frame_with_timeout(struct can_frame *frame)
 {
         int ret;
 
-        /* Reset semaphore before sending */
+        /* Reset semaphore and callback error before sending */
         k_sem_reset(&tx_sem);
+        tx_callback_error = 0;
 
-        ret = can_send(can_dev, frame, K_MSEC(CAN_SEND_TIMEOUT_MS),
+        ret = can_send(can_dev, frame, K_NO_WAIT,
                        can_tx_callback, NULL);
         if (ret != 0) {
                 LOG_ERR("can_send() failed (err %d)", ret);
@@ -321,6 +330,12 @@ static int can_send_frame_with_timeout(struct can_frame *frame)
                 LOG_ERR("TX completion timed out");
                 tx_error_count++;
                 return ret;
+        }
+
+        /* Check whether the callback reported an error */
+        if (tx_callback_error != 0) {
+                tx_error_count++;
+                return tx_callback_error;
         }
 
         tx_count++;
@@ -370,7 +385,7 @@ static int can_recover_from_bus_off(void)
 /**
  * @brief Application entry point.
  *
- * 1. Initialises the CAN device (with retries).
+ * 1. Initialises the CAN device (retries handled internally).
  * 2. Registers the RX filter.
  * 3. Enters a 1-second periodic TX loop that:
  *    - Handles bus-off recovery when detected.
@@ -386,24 +401,17 @@ int main(void)
 
         LOG_INF("CAN sample application starting...");
 
-        /* ----- Initialise CAN device with retries ----- */
-        for (int retry = 0; retry < CAN_INIT_MAX_RETRIES; retry++) {
-                ret = can_device_init();
-                if (ret == 0) {
-                        break;
-                }
-                LOG_WRN("CAN init retry %d/%d", retry + 1, CAN_INIT_MAX_RETRIES);
-                k_msleep(CAN_INIT_RETRY_DELAY_MS);
-        }
+        /* ----- Initialise CAN device (retries handled inside) ----- */
+        ret = can_device_init();
         if (ret != 0) {
-                LOG_ERR("CAN initialisation failed — halting");
+                LOG_ERR("CAN initialisation failed - halting");
                 return ret;
         }
 
         /* ----- Register RX filter ----- */
         ret = can_setup_rx_filter();
         if (ret < 0) {
-                LOG_ERR("RX filter setup failed — halting");
+                LOG_ERR("RX filter setup failed - halting");
                 return ret;
         }
 

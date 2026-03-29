@@ -177,7 +177,7 @@
         compatible = "microchip,mcp251xfd";
         reg = <0>;
         spi-max-frequency = <10000000>;  /* 10 MHz */
-        int-gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;  /* Adjust to actual INT pin */
+        int-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;  /* Adjust to actual INT pin; must not conflict with spi30/ws2812 on P1.7 */
         osc-freq = <40000000>;  /* 40 MHz external oscillator */
         bitrate = <500000>;
         sample-point = <875>;
