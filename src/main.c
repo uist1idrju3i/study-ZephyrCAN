@@ -363,25 +363,27 @@ static int can_send_frame_with_timeout(struct can_frame *frame)
 }
 
 /* ------------------------------------------------------------------ */
-/* Bus-off recovery                                                   */
+/* Controller recovery                                                */
 /* ------------------------------------------------------------------ */
 
 /**
- * @brief Attempt to recover from a CAN bus-off condition.
+ * @brief Attempt to recover the CAN controller.
  *
- * Stops the controller, waits for @ref CAN_RECOVERY_DELAY_MS, then
- * restarts it.  Logs success or failure.
+ * Called when the controller is in bus-off or stopped state.
+ * Stops the controller (tolerating -EALREADY if already stopped),
+ * waits for @ref CAN_RECOVERY_DELAY_MS, then restarts it.
+ * Logs success or failure.
  *
  * @return 0 on success, negative errno on failure.
  */
-static int can_recover_from_bus_off(void)
+static int can_recover_controller(void)
 {
         int ret;
 
-        LOG_WRN("Attempting bus-off recovery...");
+        LOG_WRN("Attempting CAN controller recovery...");
 
         ret = can_stop(can_dev);
-        if (ret != 0) {
+        if (ret != 0 && ret != -EALREADY) {
                 LOG_ERR("can_stop() failed during recovery (err %d)", ret);
                 return ret;
         }
@@ -394,7 +396,7 @@ static int can_recover_from_bus_off(void)
                 return ret;
         }
 
-        LOG_INF("Bus-off recovery succeeded");
+        LOG_INF("CAN controller recovery succeeded");
         return 0;
 }
 
@@ -445,9 +447,9 @@ int main(void)
                 /* Handle bus-off or stopped condition */
                 if (current_can_state == CAN_STATE_BUS_OFF ||
                     current_can_state == CAN_STATE_STOPPED) {
-                        ret = can_recover_from_bus_off();
+                        ret = can_recover_controller();
                         if (ret != 0) {
-                                LOG_ERR("Bus-off recovery failed; retrying next cycle");
+                                LOG_ERR("Controller recovery failed; retrying next cycle");
                                 continue;
                         }
                 }

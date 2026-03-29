@@ -80,8 +80,8 @@ flowchart TD
     C1 -->|Yes| D[メイン送信ループ]
 
     D --> E[1000 ms スリープ]
-    E --> F{バスオフ?}
-    F -->|Yes| G[can_recover_from_bus_off\nstop -> sleep -> restart]
+    E --> F{バスオフ /\n停止?}
+    F -->|Yes| G[can_recover_controller\nstop -> sleep -> restart]
     G --> G1{復帰成功?}
     G1 -->|No| E
     G1 -->|Yes| H
@@ -126,13 +126,13 @@ stateDiagram-v2
 
 ### TX 完了フロー
 
-送信はメインスレッドと ISR コールバック間のセマフォベースの同期で行われます。
+送信はメインスレッドとドライバコールバックスレッド間のセマフォベースの同期で行われます。
 
 ```mermaid
 sequenceDiagram
     participant Main as メインスレッド
     participant API as Zephyr CAN API
-    participant ISR as TX コールバック (ISR)
+    participant CB as TX コールバック (スレッド)
 
     Main->>Main: k_sem_reset(&tx_sem)
     Main->>API: can_send(frame, K_NO_WAIT, callback)
@@ -141,9 +141,9 @@ sequenceDiagram
 
     Note over API: ハードウェアがフレームを送信
 
-    API->>ISR: can_tx_callback(error)
-    ISR->>ISR: tx_callback_error = error
-    ISR->>Main: k_sem_give(&tx_sem)
+    API->>CB: can_tx_callback(error)
+    CB->>CB: tx_callback_error = error
+    CB->>Main: k_sem_give(&tx_sem)
 
     Main->>Main: tx_callback_error を確認
     alt error == 0

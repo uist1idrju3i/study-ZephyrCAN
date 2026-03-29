@@ -80,8 +80,8 @@ flowchart TD
     C1 -->|Yes| D[Main TX loop]
 
     D --> E[Sleep 1000 ms]
-    E --> F{Bus-off?}
-    F -->|Yes| G[can_recover_from_bus_off\nstop -> sleep -> restart]
+    E --> F{Bus-off /\nStopped?}
+    F -->|Yes| G[can_recover_controller\nstop -> sleep -> restart]
     G --> G1{Recovered?}
     G1 -->|No| E
     G1 -->|Yes| H
@@ -126,13 +126,13 @@ stateDiagram-v2
 
 ### TX Completion Flow
 
-Transmission uses a semaphore-based synchronization between the main thread and the ISR callback.
+Transmission uses a semaphore-based synchronization between the main thread and the driver callback thread.
 
 ```mermaid
 sequenceDiagram
     participant Main as Main Thread
     participant API as Zephyr CAN API
-    participant ISR as TX Callback (ISR)
+    participant CB as TX Callback (Thread)
 
     Main->>Main: k_sem_reset(&tx_sem)
     Main->>API: can_send(frame, K_NO_WAIT, callback)
@@ -141,9 +141,9 @@ sequenceDiagram
 
     Note over API: Hardware transmits frame
 
-    API->>ISR: can_tx_callback(error)
-    ISR->>ISR: tx_callback_error = error
-    ISR->>Main: k_sem_give(&tx_sem)
+    API->>CB: can_tx_callback(error)
+    CB->>CB: tx_callback_error = error
+    CB->>Main: k_sem_give(&tx_sem)
 
     Main->>Main: Check tx_callback_error
     alt error == 0
