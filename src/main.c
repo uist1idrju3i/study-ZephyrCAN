@@ -16,6 +16,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/can.h>
 #include <zephyr/logging/log.h>
+#include <stdint.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(can_sample, LOG_LEVEL_INF);
@@ -335,8 +336,9 @@ static void can_state_change_callback(const struct device *dev,
 /**
  * @brief Build a standard CAN TX frame.
  *
- * Constructs a CAN 2.0 frame with ID @ref CAN_TX_MSG_ID, DLC = 8,
- * and embeds a rolling counter in the first two data bytes.
+ * Constructs a CAN 2.0 frame with ID @ref CAN_TX_MSG_ID,
+ * DLC = @ref CAN_TX_DATA_LEN, and embeds a rolling counter in the
+ * first two data bytes.
  *
  * @param[out] frame   Pointer to the frame to populate.
  * @param      counter Rolling counter value to embed.
@@ -432,7 +434,7 @@ static int can_send_frame_with_timeout(struct can_frame *frame)
  * Stops the controller (tolerating -EALREADY if already stopped),
  * waits, then restarts it.
  *
- * The wait duration uses exponential back-off: the first
+ * The wait duration uses a two-level backoff: the first
  * @ref CAN_RECOVERY_MAX_RETRIES attempts wait @ref CAN_RECOVERY_DELAY_MS;
  * subsequent attempts wait @ref CAN_RECOVERY_BACKOFF_MS.  The failure
  * counter is reset to zero on a successful recovery.
@@ -510,6 +512,7 @@ int main(void)
                 LOG_ERR("CAN initialisation failed - halting");
                 goto halt;
         }
+        current_can_state = CAN_STATE_ERROR_ACTIVE;
 
         /* ----- Register RX filter ----- */
         ret = can_setup_rx_filter();
@@ -549,7 +552,8 @@ int main(void)
                         consecutive_tx_errors++;
                         LOG_ERR("TX failed (err %d, consecutive=%u)",
                                 ret, consecutive_tx_errors);
-                        if (consecutive_tx_errors == CAN_TX_ERR_BURST_THRESHOLD) {
+                        if (consecutive_tx_errors > 0U &&
+                            (consecutive_tx_errors % CAN_TX_ERR_BURST_THRESHOLD) == 0U) {
                                 LOG_WRN("TX error burst: %u consecutive failures",
                                         consecutive_tx_errors);
                         }
