@@ -6,7 +6,7 @@
 
 ## 動作確認済みハードウェア
 
-以下のハードウェアで OpenBlink の動作を確認しています:
+以下のハードウェアで study-ZephyrCAN の動作を確認しています:
 
 - [Seeed XIAO nRF54L15](https://wiki.seeedstudio.com/xiao_nrf54l15_sense_getting_started/) (ボードターゲット: xiao_nrf54l15/nrf54l15/cpuapp)
 - Microchip [MCP251863](https://www.microchip.com/en-us/product/MCP251863) (CAN FD コントローラ + トランシーバ)
