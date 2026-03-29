@@ -68,7 +68,7 @@ block-beta
 flowchart TD
     A([main]) --> B[can_device_init]
     B --> B1{デバイス準備完了?}
-    B1 -->|No| ERR1([エラーで終了])
+    B1 -->|No| ERR1([goto halt])
     B1 -->|Yes| B2[状態変更コールバック登録]
     B2 --> B3[CAN_MODE_NORMAL 設定]
     B3 --> B4[can_start リトライ\n最大10回]
@@ -77,6 +77,8 @@ flowchart TD
     B5 -->|Yes| C[can_setup_rx_filter\nID=0x200 mask=0x7FF]
     C --> C1{フィルタ登録成功?}
     C1 -->|No| ERR1
+
+    ERR1 --> HALT(["致命的エラー - システム停止\n(無限スリープループ)"])
     C1 -->|Yes| D[メイン送信ループ]
 
     D --> E[1000 ms スリープ]
@@ -180,6 +182,9 @@ sequenceDiagram
 | `CAN_RECOVERY_DELAY_MS` | `1000` | バスオフ復帰時の待機時間 (ms) |
 | `CAN_RECOVERY_MAX_RETRIES` | `5` | バックオフ前の最大連続復帰失敗回数 |
 | `CAN_RECOVERY_BACKOFF_MS` | `5000` | 連続復帰失敗後の拡張待機時間 (ms) |
+| `CAN_TX_DATA_LEN` | `8` | TX フレームあたりのデータバイト数 (標準 CAN 最大値) |
+| `STATS_PRINT_INTERVAL` | `10` | 統計ログ出力間隔 (成功 TX フレーム数) |
+| `CAN_TX_ERR_BURST_THRESHOLD` | `5` | バースト警告前の連続 TX 失敗回数 |
 
 > **注意:** `prj.conf` には親プロジェクト OpenBlink の BLE、mruby/c VM、その他ペリフェラル用の設定も含まれています。本サンプルに関連するのは以下の CAN 関連設定のみです。
 
@@ -214,6 +219,7 @@ Data:  CNT_H  CNT_L  0xCA  0xFE  0xDE  0xAD  0xBE  0xEF
 正常動作時、以下のようなログが出力されます:
 
 ```
+[INF] CAN sample application starting...
 [INF] CAN device mcp251863@0 is ready
 [INF] CAN controller started successfully
 [INF] RX filter added: ID=0x200 mask=0x7FF (filter_id=0)

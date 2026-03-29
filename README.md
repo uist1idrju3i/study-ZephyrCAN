@@ -68,7 +68,7 @@ block-beta
 flowchart TD
     A([main]) --> B[can_device_init]
     B --> B1{Device ready?}
-    B1 -->|No| ERR1([Return error])
+    B1 -->|No| ERR1([goto halt])
     B1 -->|Yes| B2[Register state-change callback]
     B2 --> B3[Set CAN_MODE_NORMAL]
     B3 --> B4[can_start with retry\nup to 10 attempts]
@@ -77,6 +77,8 @@ flowchart TD
     B5 -->|Yes| C[can_setup_rx_filter\nID=0x200 mask=0x7FF]
     C --> C1{Filter added?}
     C1 -->|No| ERR1
+
+    ERR1 --> HALT(["Fatal error - system halted\n(infinite sleep loop)"])
     C1 -->|Yes| D[Main TX loop]
 
     D --> E[Sleep 1000 ms]
@@ -180,6 +182,9 @@ Defined in `src/main.c`:
 | `CAN_RECOVERY_DELAY_MS` | `1000` | Delay during bus-off recovery (ms) |
 | `CAN_RECOVERY_MAX_RETRIES` | `5` | Max consecutive recovery failures before backoff |
 | `CAN_RECOVERY_BACKOFF_MS` | `5000` | Extended delay after repeated recovery failures (ms) |
+| `CAN_TX_DATA_LEN` | `8` | Number of data bytes per TX frame (standard CAN max) |
+| `STATS_PRINT_INTERVAL` | `10` | Successful TX frames between statistics log messages |
+| `CAN_TX_ERR_BURST_THRESHOLD` | `5` | Consecutive TX failures before burst warning |
 
 > **Note:** `prj.conf` contains additional configuration for BLE, mruby/c VM, and other peripherals from the parent OpenBlink project. Only the CAN-related settings listed below are relevant to this sample.
 
@@ -214,6 +219,7 @@ Data:  CNT_H  CNT_L  0xCA  0xFE  0xDE  0xAD  0xBE  0xEF
 When running correctly, you should see output similar to:
 
 ```
+[INF] CAN sample application starting...
 [INF] CAN device mcp251863@0 is ready
 [INF] CAN controller started successfully
 [INF] RX filter added: ID=0x200 mask=0x7FF (filter_id=0)
