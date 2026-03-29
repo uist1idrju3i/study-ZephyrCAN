@@ -4,9 +4,9 @@
 
 > [Japanese / 日本語版はこちら](README.ja.md)
 
-## Verified Hardware
+## Target Hardware (Build Verified)
 
-The following hardware platforms have been tested with study-ZephyrCAN:
+The following hardware platforms are targeted by study-ZephyrCAN (build verified, runtime untested):
 
 - [Seeed XIAO nRF54L15](https://wiki.seeedstudio.com/xiao_nrf54l15_sense_getting_started/) (Board target: xiao_nrf54l15/nrf54l15/cpuapp)
 - Microchip [MCP251863](https://www.microchip.com/en-us/product/MCP251863) (CAN FD controller + transceiver)

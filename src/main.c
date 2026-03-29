@@ -60,8 +60,16 @@ static const struct device *const can_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_canbu
 /** Semaphore used to wait for TX completion inside the send helper */
 static K_SEM_DEFINE(tx_sem, 0, 1);
 
-/** Error status reported by the TX callback (written in ISR context) */
+/** Error status reported by the TX callback (written in callback context) */
 static volatile int tx_callback_error;
+
+/**
+ * Generation counter for TX callback synchronisation.
+ * Incremented before each can_send(); the callback checks whether its
+ * generation still matches the current one and silently discards stale
+ * completions (e.g. from a previously timed-out frame).
+ */
+static volatile uint32_t tx_generation;
 
 /* ------------------------------------------------------------------ */
 /* Statistics counters                                                 */
@@ -180,8 +188,8 @@ static int can_setup_rx_filter(void)
  * @brief Callback invoked when a CAN frame matching the RX filter
  *        is received.
  *
- * Runs in ISR context; uses LOG_INF which is safe in deferred/minimal
- * logging modes.
+ * Runs in the MCP251XFD driver's interrupt-handler thread (not a
+ * hardware ISR).  LOG_INF is safe here under all logging modes.
  *
  * @param dev       CAN device that received the frame.
  * @param frame     Pointer to the received CAN frame.
@@ -220,7 +228,15 @@ static void can_tx_callback(const struct device *dev, int error,
                             void *user_data)
 {
         ARG_UNUSED(dev);
-        ARG_UNUSED(user_data);
+
+        uint32_t cb_gen = (uint32_t)(uintptr_t)user_data;
+
+        /* Discard stale callbacks from a previously timed-out frame */
+        if (cb_gen != tx_generation) {
+                LOG_WRN("Stale TX callback (gen %u, expected %u) - discarded",
+                        cb_gen, tx_generation);
+                return;
+        }
 
         tx_callback_error = error;
 
@@ -312,12 +328,16 @@ static int can_send_frame_with_timeout(struct can_frame *frame)
 {
         int ret;
 
+        /* Advance generation so any stale callback is discarded */
+        tx_generation++;
+
         /* Reset semaphore and callback error before sending */
         k_sem_reset(&tx_sem);
         tx_callback_error = 0;
 
         ret = can_send(can_dev, frame, K_NO_WAIT,
-                       can_tx_callback, NULL);
+                       can_tx_callback,
+                       (void *)(uintptr_t)tx_generation);
         if (ret != 0) {
                 LOG_ERR("can_send() failed (err %d)", ret);
                 tx_error_count++;
@@ -398,6 +418,7 @@ int main(void)
 {
         int ret;
         uint16_t counter = 0;
+        uint16_t last_stats_counter = 0;
 
         LOG_INF("CAN sample application starting...");
 
@@ -421,8 +442,9 @@ int main(void)
         while (1) {
                 k_msleep(CAN_TX_INTERVAL_MS);
 
-                /* Handle bus-off condition */
-                if (current_can_state == CAN_STATE_BUS_OFF) {
+                /* Handle bus-off or stopped condition */
+                if (current_can_state == CAN_STATE_BUS_OFF ||
+                    current_can_state == CAN_STATE_STOPPED) {
                         ret = can_recover_from_bus_off();
                         if (ret != 0) {
                                 LOG_ERR("Bus-off recovery failed; retrying next cycle");
@@ -443,8 +465,10 @@ int main(void)
                         LOG_ERR("TX failed (err %d)", ret);
                 }
 
-                /* Print statistics every 10 frames */
-                if (counter > 0 && (counter % 10) == 0) {
+                /* Print statistics every 10 successful frames (once) */
+                if (counter > 0 && (counter % 10) == 0 &&
+                    counter != last_stats_counter) {
+                        last_stats_counter = counter;
                         LOG_INF("Stats: TX=%u RX=%u TX_ERR=%u",
                                 tx_count, rx_count, tx_error_count);
                 }

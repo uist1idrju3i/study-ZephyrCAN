@@ -4,9 +4,9 @@
 
 > [English version is here](README.md)
 
-## 動作確認済みハードウェア
+## 対象ハードウェア (ビルド確認済み)
 
-以下のハードウェアで study-ZephyrCAN の動作を確認しています:
+以下のハードウェアを対象としています (ビルド確認済み、実機未テスト):
 
 - [Seeed XIAO nRF54L15](https://wiki.seeedstudio.com/xiao_nrf54l15_sense_getting_started/) (ボードターゲット: xiao_nrf54l15/nrf54l15/cpuapp)
 - Microchip [MCP251863](https://www.microchip.com/en-us/product/MCP251863) (CAN FD コントローラ + トランシーバ)
