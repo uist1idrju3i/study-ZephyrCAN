@@ -6,7 +6,7 @@
 
 The following hardware platforms have been tested with OpenBlink:
 
-- Seeed XIAO nRF54L15 (Board target: xiao_nrf54l15/nrf54l15/cpuapp)
+- [Seeed XIAO nRF54L15](https://wiki.seeedstudio.com/xiao_nrf54l15_sense_getting_started/) (Board target: xiao_nrf54l15/nrf54l15/cpuapp)
 - Microchip [MCP251863](https://www.microchip.com/en-us/product/MCP251863)
 
 ## Development Environment Versions
