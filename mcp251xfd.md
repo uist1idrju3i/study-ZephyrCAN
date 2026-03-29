@@ -98,7 +98,7 @@ These options are available under `CONFIG_CAN_MCP251XFD`:
 | `CONFIG_CAN_MCP251XFD_INT_THREAD_STACK_SIZE` | int | 768 | -- | Stack size (bytes) for the internal interrupt-handler thread. |
 | `CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO` | int | 2 | -- | Priority of the interrupt-handler thread. A higher number = higher priority. The thread is cooperative (will not be preempted until it yields). |
 | `CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES` | int | 5 | -- | Number of retries for SFR register reads if the CRC check fails. |
-| `CONFIG_CAN_MCP251XFD_MAX_FILTERS` | int | 16 | 1--32 | Maximum number of concurrent active RX filters supported by `can_add_rx_filter()`. |
+| `CONFIG_CAN_MAX_FILTER` | int | 5 | 1--32 | Maximum number of concurrent active RX filters supported by `can_add_rx_filter()`. Note: This is defined under the `CAN_MCP251XFD` Kconfig scope but uses a generic name. |
 
 ### General CAN Subsystem Options
 
@@ -141,7 +141,7 @@ CONFIG_CAN_MCP251XFD_RX_FIFO_ITEMS=32
 CONFIG_CAN_MCP251XFD_INT_THREAD_STACK_SIZE=1024
 CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO=2
 CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES=5
-CONFIG_CAN_MCP251XFD_MAX_FILTERS=16
+CONFIG_CAN_MAX_FILTER=16
 
 # Bitrate defaults (can also be set in devicetree)
 CONFIG_CAN_DEFAULT_BITRATE=500000
@@ -487,7 +487,7 @@ during initialization or are reserved):
 | **Read with CRC** (`mcp251xfd_read_crc`) | `0b1011` | CRC-protected read. 2-byte command + 1-byte length + data + 2-byte CRC. Used for SFR reads to ensure data integrity. |
 | **Write** (`mcp251xfd_write`) | `0b0010` | Register write. 2-byte command header + data. |
 
-- **CRC polynomial:** `0x8005` (CRC-16/USB)
+- **CRC polynomial:** `0x8005` (CRC-16/USB) -- a widely used 16-bit polynomial that provides HD=6 (Hamming distance 6) for data lengths up to 64 bits (ref: [Koopman CRC Catalog](https://users.ece.cmu.edu/~koopman/crc/index.html)).
 - **CRC seed:** `0xFFFF`
 - **SPI word size:** 8 bits (configured via `SPI_WORD_SET(8)` in the instantiation macro)
 - **Read CRC retries:** Controlled by `CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES` (default: 5)
@@ -610,9 +610,9 @@ struct mcp251xfd_data {
 
     /* Filter Data */
     uint32_t filter_usage;                  /* bitmask of used RX filters */
-    struct can_filter filter[CONFIG_CAN_MCP251XFD_MAX_FILTERS];          /* active filters */
-    can_rx_callback_t rx_cb[CONFIG_CAN_MCP251XFD_MAX_FILTERS];           /* RX callbacks */
-    void *cb_arg[CONFIG_CAN_MCP251XFD_MAX_FILTERS];                      /* callback args */
+    struct can_filter filter[CONFIG_CAN_MAX_FILTER];                     /* active filters */
+    can_rx_callback_t rx_cb[CONFIG_CAN_MAX_FILTER];                      /* RX callbacks */
+    void *cb_arg[CONFIG_CAN_MAX_FILTER];                                 /* callback args */
 
     const struct device *dev;               /* back-reference to device */
 
@@ -698,12 +698,12 @@ The driver implements the full Zephyr CAN API:
 | `can_start()` | `mcp251xfd_start` | Transition from config mode to operational mode |
 | `can_stop()` | `mcp251xfd_stop` | Abort all TX, return to config mode |
 | `can_send()` | `mcp251xfd_send` | Queue a CAN frame for transmission |
-| `can_add_rx_filter()` | `mcp251xfd_add_rx_filter` | Add an RX acceptance filter (up to `MAX_FILTERS`) |
+| `can_add_rx_filter()` | `mcp251xfd_add_rx_filter` | Add an RX acceptance filter (up to `CONFIG_CAN_MAX_FILTER`) |
 | `can_remove_rx_filter()` | `mcp251xfd_remove_rx_filter` | Remove an RX filter |
 | `can_get_state()` | `mcp251xfd_get_state` | Get current CAN bus error state and counters |
 | `can_set_state_change_callback()` | `mcp251xfd_set_state_change_callback` | Register a state-change callback |
 | `can_get_core_clock()` | `mcp251xfd_get_core_clock` | Returns the CAN core clock derived from the configured oscillator frequency (`osc_freq`) |
-| `can_get_max_filters()` | `mcp251xfd_get_max_filters` | Returns `CONFIG_CAN_MCP251XFD_MAX_FILTERS` |
+| `can_get_max_filters()` | `mcp251xfd_get_max_filters` | Returns `CONFIG_CAN_MAX_FILTER` |
 
 **Bit timing limits:**
 
