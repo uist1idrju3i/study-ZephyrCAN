@@ -96,7 +96,7 @@ These options are available under `CONFIG_CAN_MCP251XFD`:
 | `CONFIG_CAN_MCP251XFD_MAX_TX_QUEUE` | int | 8 | 1--32 | Number of messages in the TX queue. Also defines the array size of transmit callback pointers, semaphores, and the TEF FIFO depth. |
 | `CONFIG_CAN_MCP251XFD_RX_FIFO_ITEMS` | int | 16 | 1--32 | Number of CAN messages in the RX FIFO. Directly affects RAM usage on the MCP251XFD chip. |
 | `CONFIG_CAN_MCP251XFD_INT_THREAD_STACK_SIZE` | int | 768 | -- | Stack size (bytes) for the internal interrupt-handler thread. |
-| `CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO` | int | 2 | -- | Priority of the interrupt-handler thread. A higher number = higher priority. The thread is cooperative (will not be preempted until it yields). |
+| `CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO` | int | 2 | -- | Priority of the interrupt-handler thread. In Zephyr, a **lower** non-negative number means **higher** priority among preemptive threads. Negative values designate cooperative threads. The default value of 2 creates a preemptive thread. If deterministic interrupt handling latency is required, consider using a negative value (e.g., -1) to make the thread cooperative. |
 | `CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES` | int | 5 | -- | Number of retries for SFR register reads if the CRC check fails. |
 | `CONFIG_CAN_MAX_FILTER` | int | 5 | 1--32 | Maximum number of concurrent active RX filters supported by `can_add_rx_filter()`. Note: This is defined under the `CAN_MCP251XFD` Kconfig scope but uses a generic name. |
 
@@ -382,30 +382,27 @@ From `boards/shields/mikroe_mcp251xfd_click/mikroe_mcp2518fd_click.overlay`:
 
 ### Architecture
 
-```
-+---------------------+          SPI Bus          +-------------------+
-|                     |  MOSI/MISO/SCK/CS/INT     |                   |
-|    Host MCU         | <-----------------------> |   MCP251XFD       |
-|                     |                            |                   |
-|  +---------------+  |                            |  +-------------+  |
-|  | Zephyr App    |  |                            |  | CAN FD Core |  |
-|  +-------+-------+  |                            |  +------+------+  |
-|          |           |                            |         |         |
-|  +-------v-------+  |                            |  +------v------+  |
-|  | CAN API       |  |                            |  | 2 KB RAM    |  |
-|  | (can.h)       |  |                            |  | TEF|TXQ|RXF |  |
-|  +-------+-------+  |                            |  +-------------+  |
-|          |           |                            |         |         |
-|  +-------v-------+  |                            |  +------v------+  |
-|  | MCP251XFD     |  |   SPI Read/Write/CRC       |  | SPI Slave   |  |
-|  | Driver        +--+--------------------------->|  | Interface   |  |
-|  +-------+-------+  |                            |  +-------------+  |
-|          |           |                            |                   |
-|  +-------v-------+  |        GPIO (INT)          |  INT pin          |
-|  | INT Thread    |<-+----------------------------+  (active-low)     |
-|  | (cooperative) |  |                            |                   |
-|  +---------------+  |                            +-------------------+
-+---------------------+                            CAN H/L to Bus
+```mermaid
+flowchart LR
+    subgraph HOST["Host MCU"]
+        APP["Zephyr App"]
+        API["CAN API\n(can.h)"]
+        DRV["MCP251XFD\nDriver"]
+        INT_THREAD["INT Thread\n(cooperative)"]
+        APP --> API --> DRV
+        DRV --> INT_THREAD
+    end
+    subgraph CHIP["MCP251XFD"]
+        SPI_IF["SPI Slave\nInterface"]
+        RAM["2 KB RAM\nTEF | TXQ | RXF"]
+        CORE["CAN FD Core"]
+        INT_PIN["INT Pin\n(active-low)"]
+        SPI_IF --> RAM --> CORE
+        CORE --> INT_PIN
+    end
+    DRV -- "SPI Read/Write/CRC" --> SPI_IF
+    INT_PIN -- "GPIO (level-triggered)" --> INT_THREAD
+    CORE --> BUS["CAN Bus\n(CANH / CANL)"]
 ```
 
 ### RAM Layout
@@ -413,24 +410,16 @@ From `boards/shields/mikroe_mcp251xfd_click/mikroe_mcp2518fd_click.overlay`:
 The MCP251XFD has **2048 bytes** of on-chip RAM starting at address `0x400`. This RAM
 is partitioned into three FIFO regions at compile time:
 
-```
-Address 0x400
-+----------------------------------------------+
-|  TEF FIFO (Transmit Event FIFO)              |  Offset 0x000
-|  Items = CONFIG_CAN_MCP251XFD_MAX_TX_QUEUE   |
-|  Item size = 8 bytes                         |
-+----------------------------------------------+
-|  TX Queue                                    |
-|  Items = CONFIG_CAN_MCP251XFD_MAX_TX_QUEUE   |
-|  Item size = 8 + PAYLOAD_SIZE bytes           |
-+----------------------------------------------+
-|  RX FIFO                                     |
-|  Items = CONFIG_CAN_MCP251XFD_RX_FIFO_ITEMS  |
-|  Item size = 8 + PAYLOAD_SIZE (+ 4 if TS)    |
-+----------------------------------------------+
-|  (Unused remainder)                          |
-+----------------------------------------------+
-Address 0xBFF (end of 2 KB)
+```mermaid
+flowchart TD
+    subgraph RAM["MCP251XFD On-Chip RAM (2048 bytes: 0x400 - 0xBFF)"]
+        direction TB
+        TEF["TEF FIFO\nItems = MAX_TX_QUEUE\nItem size = 8 bytes"]
+        TXQ["TX Queue\nItems = MAX_TX_QUEUE\nItem size = 8 + PAYLOAD_SIZE bytes"]
+        RXF["RX FIFO\nItems = RX_FIFO_ITEMS\nItem size = 8 + PAYLOAD_SIZE (+ 4 if timestamp)"]
+        UNUSED["Unused Remainder"]
+        TEF --- TXQ --- RXF --- UNUSED
+    end
 ```
 
 **Key constants:**
@@ -492,6 +481,22 @@ during initialization or are reserved):
 - **SPI word size:** 8 bits (configured via `SPI_WORD_SET(8)` in the instantiation macro)
 - **Read CRC retries:** Controlled by `CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES` (default: 5)
 
+```mermaid
+flowchart LR
+    subgraph READ["Standard Read (opcode 0b0011)"]
+        direction LR
+        R_CMD["Command\n2 bytes\n(opcode + addr)"] --> R_DATA["Data\nN bytes"]
+    end
+    subgraph READ_CRC["Read with CRC (opcode 0b1011)"]
+        direction LR
+        RC_CMD["Command\n2 bytes"] --> RC_LEN["Length\n1 byte"] --> RC_DATA["Data\nN bytes"] --> RC_CRC["CRC-16\n2 bytes"]
+    end
+    subgraph WRITE["Standard Write (opcode 0b0010)"]
+        direction LR
+        W_CMD["Command\n2 bytes\n(opcode + addr)"] --> W_DATA["Data\nN bytes"]
+    end
+```
+
 ### Interrupt Handling
 
 The MCP251XFD uses a **level-triggered, active-low** interrupt output:
@@ -512,6 +517,29 @@ The MCP251XFD uses a **level-triggered, active-low** interrupt output:
    - **RXOVIF** -- RX overflow interrupts -- only enabled when `CONFIG_CAN_STATS` is set
 
 3. After processing, the thread **re-enables** level-triggered GPIO interrupts.
+
+```mermaid
+flowchart TD
+    INT_LOW["MCP251XFD INT pin\ngoes LOW"] --> GPIO_CB["GPIO callback fires"]
+    GPIO_CB --> DISABLE["Disable further\nGPIO interrupts"]
+    DISABLE --> SIGNAL["k_sem_give(&int_sem)"]
+    SIGNAL --> THREAD["INT thread wakes\n(k_sem_take)"]
+    THREAD --> READ["Read interrupt flags\nvia SPI"]
+    READ --> RXIF{"RXIF?"}
+    RXIF -->|Yes| RX_PROC["Read RX FIFO\nDispatch to filter callbacks"]
+    RXIF -->|No| TEFIF
+    RX_PROC --> TEFIF{"TEFIF?"}
+    TEFIF -->|Yes| TEF_PROC["Read TEF\nInvoke TX completion callbacks"]
+    TEFIF -->|No| MODIF
+    TEF_PROC --> MODIF{"MODIF?"}
+    MODIF -->|Yes| MOD_PROC["Handle mode change"]
+    MODIF -->|No| CERRIF
+    MOD_PROC --> CERRIF{"CERRIF?"}
+    CERRIF -->|Yes| ERR_PROC["Handle CAN errors\n(bus-off, error-passive, etc.)"]
+    CERRIF -->|No| DONE
+    ERR_PROC --> DONE["Re-enable GPIO\ninterrupts"]
+    DONE --> THREAD
+```
 
 > **Important:** The host MCU GPIO controller **must support level-triggered interrupts**
 > (`GPIO_INT_LEVEL_ACTIVE`). Edge-triggered interrupts may miss events if the MCP251XFD
@@ -542,6 +570,23 @@ The `mcp251xfd_init()` function performs the following steps:
     - RX FIFO (depth = `RX_FIFO_ITEMS`, payload = `PAYLOAD_SIZE`, timestamps optional)
 11. Apply nominal bit timing (and data bit timing for CAN FD)
 
+```mermaid
+flowchart TD
+    START(["mcp251xfd_init()"]) --> CLK["Enable external clock\n(if clocks property exists)"]
+    CLK --> SEM["Initialize semaphores\n(int_sem, tx_sem) and mutex"]
+    SEM --> CHK["Verify SPI bus and\nGPIO port readiness"]
+    CHK --> GPIO["Configure INT GPIO\n(level-triggered interrupt)"]
+    GPIO --> THREAD["Start interrupt\nhandler thread"]
+    THREAD --> RESET["Reset MCP251XFD\nvia SPI"]
+    RESET --> VERIFY{"Configuration\nmode?"}
+    VERIFY -->|No| ERR(["Return error"])
+    VERIFY -->|Yes| TIMING["Calculate bit timing\nfrom DT properties"]
+    TIMING --> REGS["Initialize registers\n(CON, OSC, IOCON, INT, TDC, TSCON)"]
+    REGS --> FIFO["Initialize FIFOs\n(TEF, TX Queue, RX FIFO)"]
+    FIFO --> BT["Apply bit timing\n(nominal + data)"]
+    BT --> DONE(["Init complete\n(Configuration mode)"])
+```
+
 ### Operating Modes Mapping
 
 The driver maps Zephyr CAN modes to MCP251XFD hardware modes:
@@ -558,6 +603,24 @@ The driver maps Zephyr CAN modes to MCP251XFD hardware modes:
 > When switching from Configuration mode to Mixed (CAN FD) mode, Transmitter Delay
 > Compensation (TDC) is automatically enabled in auto mode. When switching to CAN 2.0
 > or loopback modes, TDC is disabled.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Configuration : "Power-on / Reset"
+    Configuration --> CAN2_0 : "can_start()\n(CAN_MODE_NORMAL)"
+    Configuration --> Mixed : "can_start()\n(CAN_MODE_FD)"
+    Configuration --> ListenOnly : "can_start()\n(CAN_MODE_LISTENONLY)"
+    Configuration --> ExtLoopback : "can_start()\n(CAN_MODE_LOOPBACK)"
+    CAN2_0 --> Configuration : "can_stop()"
+    Mixed --> Configuration : "can_stop()"
+    ListenOnly --> Configuration : "can_stop()"
+    ExtLoopback --> Configuration : "can_stop()"
+
+    note right of Mixed
+        TDC auto-enabled
+        when entering this mode
+    end note
+```
 
 ### Data Structures
 

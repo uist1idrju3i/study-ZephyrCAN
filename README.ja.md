@@ -25,28 +25,21 @@
 ### システム構成
 
 ```mermaid
-block-beta
-  columns 3
-
-  block:MCU["Seeed XIAO nRF54L15"]:2
-    columns 2
-    APP["Zephyr アプリケーション\n(src/main.c)"]
-    CAN_API["Zephyr CAN API\n(can_send / can_add_rx_filter)"]
-    SPI_DRV["SPI マスタードライバ\n(SPIM0)"]
-    MCP_DRV["MCP251XFD ドライバ\n(can_mcp251xfd)"]
-  end
-
-  block:EXT["MCP251863"]:1
-    columns 1
-    CTRL["CAN FD\nコントローラ"]
-    XCVR["CAN\nトランシーバ"]
-  end
-
-  SPI_DRV --> CTRL
-  XCVR --> BUS["CAN バス"]
-
-  style MCU fill:#e3f2fd,stroke:#1565c0
-  style EXT fill:#fff3e0,stroke:#e65100
+flowchart LR
+    subgraph MCU["Seeed XIAO nRF54L15"]
+        APP["Zephyr Application\n(src/main.c)"]
+        CAN_API["Zephyr CAN API\n(can_send / can_add_rx_filter)"]
+        MCP_DRV["MCP251XFD Driver\n(can_mcp251xfd)"]
+        SPI_DRV["SPI Master Driver\n(SPI00)"]
+        APP --> CAN_API --> MCP_DRV --> SPI_DRV
+    end
+    subgraph EXT["MCP251863"]
+        CTRL["CAN FD Controller\n(MCP2518FD)"]
+        XCVR["CAN Transceiver\n(ATA6563)"]
+        CTRL --> XCVR
+    end
+    SPI_DRV -- "SPI (SCK/MOSI/MISO/CS)\nGPIO (INT)" --> CTRL
+    XCVR --> BUS["CAN Bus\n(CANH / CANL)"]
 ```
 
 ### ピンアサイン
@@ -61,6 +54,35 @@ block-beta
 | WS2812 | P1.4-P1.7 | SPI20-SPI30 | LED ストリップデータ (既存) |
 
 > **注意:** ピンアサインはプレースホルダです。フラッシュ前に実際のハードウェア配線と照合してください。
+
+### ハードウェア接続図
+
+```mermaid
+flowchart LR
+    subgraph XIAO["XIAO nRF54L15"]
+        P10["P1.0 (CS)"]
+        P11["P1.1 (SCK)"]
+        P12["P1.2 (MOSI)"]
+        P13["P1.3 (MISO)"]
+        P18["P1.8 (INT)"]
+    end
+    subgraph MCP["MCP251863"]
+        CS_PIN["nCS"]
+        SCK_PIN["SCK"]
+        SI_PIN["SI"]
+        SO_PIN["SO"]
+        INT_PIN["nINT"]
+        CANH["CANH"]
+        CANL["CANL"]
+    end
+    P10 --- CS_PIN
+    P11 --- SCK_PIN
+    P12 --- SI_PIN
+    P13 --- SO_PIN
+    P18 --- INT_PIN
+    CANH --- BUS["CAN Bus"]
+    CANL --- BUS
+```
 
 ### アプリケーションフロー
 
@@ -132,22 +154,28 @@ stateDiagram-v2
 
 ```mermaid
 sequenceDiagram
-    participant Main as メインスレッド
+    participant Main as Main Thread
     participant API as Zephyr CAN API
-    participant CB as TX コールバック (スレッド)
+    participant CB as TX Callback
 
+    Main->>Main: tx_generation++
     Main->>Main: k_sem_reset(&tx_sem)
-    Main->>API: can_send(frame, K_NO_WAIT, callback)
-    API-->>Main: 0 (キュー投入済み)
+    Main->>API: can_send(frame, K_NO_WAIT, callback, generation)
+    API-->>Main: 0 (queued)
     Main->>Main: k_sem_take(&tx_sem, 100 ms)
 
-    Note over API: ハードウェアがフレームを送信
+    Note over API: Hardware transmits frame
 
-    API->>CB: can_tx_callback(error)
-    CB->>CB: tx_callback_error = error
-    CB->>Main: k_sem_give(&tx_sem)
+    API->>CB: can_tx_callback(error, user_data=generation)
+    CB->>CB: Check generation match
+    alt generation matches
+        CB->>CB: tx_callback_error = error
+        CB->>Main: k_sem_give(&tx_sem)
+    else stale callback
+        CB->>CB: Discard (log warning)
+    end
 
-    Main->>Main: tx_callback_error を確認
+    Main->>Main: Check tx_callback_error
     alt error == 0
         Main->>Main: tx_count++
     else error != 0
@@ -199,6 +227,9 @@ sequenceDiagram
 | `CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO` | `2` | 割り込みハンドラスレッド優先度 |
 | `CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES` | `5` | SPI 読み取り CRC リトライ回数 |
 | `CONFIG_CAN_DEFAULT_BITRATE` | `500000` | デフォルト CAN ビットレート (500 kbps) |
+| `CONFIG_CAN_MANUAL_RECOVERY_MODE` | (未設定) | 手動バスオフ復帰 (デフォルト: n = 自動復帰) |
+
+> **バスオフ復帰に関する注意:** 現在の設定では自動復帰がデフォルトで有効ですが、`src/main.c` は `can_recover_controller()` による手動復帰ロジックを実装しています。両方のメカニズムが併存しています。量産時は、手動復帰コードと整合させるために `CONFIG_CAN_MANUAL_RECOVERY_MODE=y` を設定するか、アプリケーションから手動復帰ロジックを削除して自動復帰のみに委ねるか、どちらか一方に統一してください。
 
 ### TX フレームフォーマット
 
@@ -243,6 +274,16 @@ west flash
 ```
 
 > USB またはデバッグプローブで実機を接続する必要があります。
+
+## トラブルシューティング
+
+| 症状 | 考えられる原因 | 対処方法 |
+|------|--------------|----------|
+| CAN コントローラが起動しない | SPI 配線エラーまたは `osc-freq` の不一致 | SPI 信号接続 (SCK, MOSI, MISO, CS) を確認してください。app.overlay の `osc-freq` が実際の水晶発振子/オシレータ周波数と一致しているか確認してください。 |
+| TX タイムアウトが頻発する | CAN バス上に他のノードがない、または終端抵抗が未接続 | CAN は最低 2 つのアクティブノードが必要です。バス両端に 120 Ω の終端抵抗があることを確認してください。 |
+| Bus-Off が頻発する | ビットレート不一致、バス長過大、または終端抵抗の問題 | すべてのノードで同一ビットレートを使用してください。ケーブル長と品質を確認してください。バス両端に 120 Ω の終端抵抗があることを確認してください。 |
+| INT ピンの割り込みが動作しない | レベルトリガではなくエッジトリガが設定されている | MCP251XFD はレベルトリガ (`GPIO_INT_LEVEL_ACTIVE`) 割り込みが必須です。エッジトリガではイベントの取りこぼしが発生します。GPIO コントローラの互換性を確認してください。 |
+| SPI CRC エラーが頻発する | SPI クロック速度が速すぎるか配線が長い | `spi-max-frequency` を下げてください (例: 18 MHz → 8 MHz)。SPI 信号の配線長を短くしてください。 |
 
 ## 参考資料
 

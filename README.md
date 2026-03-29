@@ -25,28 +25,21 @@ This project provides a complete CAN bus send/receive sample running on Zephyr R
 ### System Architecture
 
 ```mermaid
-block-beta
-  columns 3
-
-  block:MCU["Seeed XIAO nRF54L15"]:2
-    columns 2
-    APP["Zephyr Application\n(src/main.c)"]
-    CAN_API["Zephyr CAN API\n(can_send / can_add_rx_filter)"]
-    SPI_DRV["SPI Master Driver\n(SPIM0)"]
-    MCP_DRV["MCP251XFD Driver\n(can_mcp251xfd)"]
-  end
-
-  block:EXT["MCP251863"]:1
-    columns 1
-    CTRL["CAN FD\nController"]
-    XCVR["CAN\nTransceiver"]
-  end
-
-  SPI_DRV --> CTRL
-  XCVR --> BUS["CAN Bus"]
-
-  style MCU fill:#e3f2fd,stroke:#1565c0
-  style EXT fill:#fff3e0,stroke:#e65100
+flowchart LR
+    subgraph MCU["Seeed XIAO nRF54L15"]
+        APP["Zephyr Application\n(src/main.c)"]
+        CAN_API["Zephyr CAN API\n(can_send / can_add_rx_filter)"]
+        MCP_DRV["MCP251XFD Driver\n(can_mcp251xfd)"]
+        SPI_DRV["SPI Master Driver\n(SPI00)"]
+        APP --> CAN_API --> MCP_DRV --> SPI_DRV
+    end
+    subgraph EXT["MCP251863"]
+        CTRL["CAN FD Controller\n(MCP2518FD)"]
+        XCVR["CAN Transceiver\n(ATA6563)"]
+        CTRL --> XCVR
+    end
+    SPI_DRV -- "SPI (SCK/MOSI/MISO/CS)\nGPIO (INT)" --> CTRL
+    XCVR --> BUS["CAN Bus\n(CANH / CANL)"]
 ```
 
 ### Pin Assignment
@@ -61,6 +54,35 @@ block-beta
 | WS2812 | P1.4-P1.7 | SPI20-SPI30 | LED strip data (existing) |
 
 > **Note:** Pin assignments are placeholders. Verify against your actual hardware wiring before flashing.
+
+### Hardware Connection Diagram
+
+```mermaid
+flowchart LR
+    subgraph XIAO["XIAO nRF54L15"]
+        P10["P1.0 (CS)"]
+        P11["P1.1 (SCK)"]
+        P12["P1.2 (MOSI)"]
+        P13["P1.3 (MISO)"]
+        P18["P1.8 (INT)"]
+    end
+    subgraph MCP["MCP251863"]
+        CS_PIN["nCS"]
+        SCK_PIN["SCK"]
+        SI_PIN["SI"]
+        SO_PIN["SO"]
+        INT_PIN["nINT"]
+        CANH["CANH"]
+        CANL["CANL"]
+    end
+    P10 --- CS_PIN
+    P11 --- SCK_PIN
+    P12 --- SI_PIN
+    P13 --- SO_PIN
+    P18 --- INT_PIN
+    CANH --- BUS["CAN Bus"]
+    CANL --- BUS
+```
 
 ### Application Flow
 
@@ -134,18 +156,24 @@ Transmission uses a semaphore-based synchronization between the main thread and 
 sequenceDiagram
     participant Main as Main Thread
     participant API as Zephyr CAN API
-    participant CB as TX Callback (Thread)
+    participant CB as TX Callback
 
+    Main->>Main: tx_generation++
     Main->>Main: k_sem_reset(&tx_sem)
-    Main->>API: can_send(frame, K_NO_WAIT, callback)
+    Main->>API: can_send(frame, K_NO_WAIT, callback, generation)
     API-->>Main: 0 (queued)
     Main->>Main: k_sem_take(&tx_sem, 100 ms)
 
     Note over API: Hardware transmits frame
 
-    API->>CB: can_tx_callback(error)
-    CB->>CB: tx_callback_error = error
-    CB->>Main: k_sem_give(&tx_sem)
+    API->>CB: can_tx_callback(error, user_data=generation)
+    CB->>CB: Check generation match
+    alt generation matches
+        CB->>CB: tx_callback_error = error
+        CB->>Main: k_sem_give(&tx_sem)
+    else stale callback
+        CB->>CB: Discard (log warning)
+    end
 
     Main->>Main: Check tx_callback_error
     alt error == 0
@@ -199,6 +227,9 @@ Defined in `src/main.c`:
 | `CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO` | `2` | Interrupt handler thread priority |
 | `CONFIG_CAN_MCP251XFD_READ_CRC_RETRIES` | `5` | SPI read CRC retry count |
 | `CONFIG_CAN_DEFAULT_BITRATE` | `500000` | Default CAN bitrate (500 kbps) |
+| `CONFIG_CAN_MANUAL_RECOVERY_MODE` | (not set) | Manual bus-off recovery (default: n = auto recovery) |
+
+> **Note on bus-off recovery:** The current configuration uses automatic recovery (default), while `src/main.c` implements manual recovery logic via `can_recover_controller()`. These two mechanisms coexist in the current setup. For production, either set `CONFIG_CAN_MANUAL_RECOVERY_MODE=y` to align with the manual recovery code, or remove the manual recovery logic from the application and rely solely on automatic recovery.
 
 ### TX Frame Format
 
@@ -243,6 +274,16 @@ west flash
 ```
 
 > Requires physical hardware connected via USB or a debug probe.
+
+## Troubleshooting
+
+| Symptom | Possible Cause | Resolution |
+|---------|---------------|------------|
+| CAN controller does not start | SPI wiring error or incorrect `osc-freq` | Verify SPI signal connections (SCK, MOSI, MISO, CS). Confirm `osc-freq` in app.overlay matches the actual crystal/oscillator frequency. |
+| TX timeout occurs frequently | No other node on the CAN bus, or missing termination | CAN requires at least two active nodes. Verify 120 ohm termination resistors are present at both ends of the bus. |
+| Bus-Off occurs frequently | Bitrate mismatch, excessive bus length, or missing termination | Ensure all nodes use the same bitrate. Check cable length and quality. Verify 120 ohm termination at both ends. |
+| INT pin interrupt not working | Edge-triggered interrupt configured instead of level-triggered | The MCP251XFD requires level-triggered (`GPIO_INT_LEVEL_ACTIVE`) interrupts. Edge-triggered interrupts will miss events. Check GPIO controller compatibility. |
+| SPI CRC errors occur frequently | SPI clock too fast or long wiring | Reduce `spi-max-frequency` (e.g., from 18 MHz to 8 MHz). Shorten SPI signal trace/wire length. |
 
 ## References
 
