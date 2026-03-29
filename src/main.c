@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+
 /**
  * @file main.c
  * @brief CAN bus send/receive sample application for Zephyr RTOS.
@@ -14,6 +16,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/can.h>
 #include <zephyr/logging/log.h>
+#include <stdint.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(can_sample, LOG_LEVEL_INF);
@@ -46,9 +49,30 @@ LOG_MODULE_REGISTER(can_sample, LOG_LEVEL_INF);
 /** Delay used during bus-off recovery sequence [ms] */
 #define CAN_RECOVERY_DELAY_MS    1000
 
+/** Maximum consecutive recovery failures before extending the delay */
+#define CAN_RECOVERY_MAX_RETRIES 5
+
+/** Extended delay after repeated recovery failures [ms] */
+#define CAN_RECOVERY_BACKOFF_MS  5000
+
+/** Number of data bytes in each transmitted frame (standard CAN maximum) */
+#define CAN_TX_DATA_LEN          8
+
+/** Number of successful TX frames between statistics log messages */
+#define STATS_PRINT_INTERVAL     10
+
+/** Log a warning after this many consecutive TX failures */
+#define CAN_TX_ERR_BURST_THRESHOLD 5
+
 /* ------------------------------------------------------------------ */
 /* CAN device obtained from Devicetree                                */
 /* ------------------------------------------------------------------ */
+
+/* Compile-time check: ensure zephyr,canbus is defined in Devicetree */
+#if !DT_HAS_CHOSEN(zephyr_canbus)
+#error "Devicetree node 'zephyr,canbus' is not defined. " \
+       "Check your board overlay or app.overlay."
+#endif
 
 /** CAN device selected via `chosen { zephyr,canbus }` in Devicetree */
 static const struct device *const can_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_canbus));
@@ -85,7 +109,10 @@ static volatile uint32_t rx_count;
 static volatile uint32_t tx_error_count;
 
 /** Tracks the current CAN controller error state */
-static volatile enum can_state current_can_state = CAN_STATE_ERROR_ACTIVE;
+static volatile enum can_state current_can_state = CAN_STATE_STOPPED;
+
+/** Number of consecutive recovery failures (reset on success) */
+static uint32_t recovery_fail_count;
 
 /* ------------------------------------------------------------------ */
 /* Forward declarations                                               */
@@ -201,18 +228,30 @@ static void can_rx_callback(const struct device *dev,
         ARG_UNUSED(dev);
         ARG_UNUSED(user_data);
 
+        if (frame == NULL) {
+                LOG_ERR("RX callback: NULL frame pointer");
+                return;
+        }
+
         rx_count++;
+
+        uint8_t len = can_dlc_to_bytes(frame->dlc);
+
+        /* Clamp to standard CAN data length for safe array access */
+        if (len > CAN_MAX_DLEN) {
+                len = CAN_MAX_DLEN;
+        }
 
         LOG_INF("RX: ID=0x%03X DLC=%u data=[%02X %02X %02X %02X %02X %02X %02X %02X]",
                 frame->id, frame->dlc,
-                (frame->dlc > 0U) ? frame->data[0] : 0U,
-                (frame->dlc > 1U) ? frame->data[1] : 0U,
-                (frame->dlc > 2U) ? frame->data[2] : 0U,
-                (frame->dlc > 3U) ? frame->data[3] : 0U,
-                (frame->dlc > 4U) ? frame->data[4] : 0U,
-                (frame->dlc > 5U) ? frame->data[5] : 0U,
-                (frame->dlc > 6U) ? frame->data[6] : 0U,
-                (frame->dlc > 7U) ? frame->data[7] : 0U);
+                (len > 0U) ? frame->data[0] : 0U,
+                (len > 1U) ? frame->data[1] : 0U,
+                (len > 2U) ? frame->data[2] : 0U,
+                (len > 3U) ? frame->data[3] : 0U,
+                (len > 4U) ? frame->data[4] : 0U,
+                (len > 5U) ? frame->data[5] : 0U,
+                (len > 6U) ? frame->data[6] : 0U,
+                (len > 7U) ? frame->data[7] : 0U);
 }
 
 /**
@@ -222,7 +261,7 @@ static void can_rx_callback(const struct device *dev,
  *
  * @param dev       CAN device that completed the send.
  * @param error     0 on success, negative errno on failure.
- * @param user_data User data (unused).
+ * @param user_data TX generation counter cast to pointer.
  */
 static void can_tx_callback(const struct device *dev, int error,
                             void *user_data)
@@ -273,12 +312,19 @@ static void can_state_change_callback(const struct device *dev,
                 [CAN_STATE_STOPPED]       = "Stopped",
         };
 
-        const char *name = (state < ARRAY_SIZE(state_names))
+        enum can_state prev = current_can_state;
+
+        const char *name = (state < ARRAY_SIZE(state_names) &&
+                            state_names[state] != NULL)
                            ? state_names[state]
                            : "Unknown";
+        const char *prev_name = (prev < ARRAY_SIZE(state_names) &&
+                                  state_names[prev] != NULL)
+                                ? state_names[prev]
+                                : "Unknown";
 
-        LOG_WRN("CAN state changed: %s (TX err=%u, RX err=%u)",
-                name, err_cnt.tx_err_cnt, err_cnt.rx_err_cnt);
+        LOG_WRN("CAN state: %s -> %s (TX err=%u, RX err=%u)",
+                prev_name, name, err_cnt.tx_err_cnt, err_cnt.rx_err_cnt);
 
         current_can_state = state;
 }
@@ -290,18 +336,21 @@ static void can_state_change_callback(const struct device *dev,
 /**
  * @brief Build a standard CAN TX frame.
  *
- * Constructs a CAN 2.0 frame with ID @ref CAN_TX_MSG_ID, DLC = 8,
- * and embeds a rolling counter in the first two data bytes.
+ * Constructs a CAN 2.0 frame with ID @ref CAN_TX_MSG_ID,
+ * DLC = @ref CAN_TX_DATA_LEN, and embeds a rolling counter in the
+ * first two data bytes.
  *
  * @param[out] frame   Pointer to the frame to populate.
  * @param      counter Rolling counter value to embed.
  */
 static void can_build_tx_frame(struct can_frame *frame, uint16_t counter)
 {
+        __ASSERT_NO_MSG(frame != NULL);
+
         memset(frame, 0, sizeof(*frame));
         frame->id    = CAN_TX_MSG_ID;
-        frame->dlc   = 8;
-        frame->flags = 0;  /* Standard CAN 2.0 frame */
+        frame->dlc   = CAN_TX_DATA_LEN;
+        frame->flags = 0;  /* Explicit: standard CAN 2.0 frame (redundant after memset, kept for clarity) */
 
         /* Bytes 0-1: rolling counter (big-endian) */
         frame->data[0] = (uint8_t)(counter >> 8);
@@ -321,12 +370,24 @@ static void can_build_tx_frame(struct can_frame *frame, uint16_t counter)
  * Calls can_send() with @ref can_tx_callback, then blocks on the TX
  * semaphore for up to @ref CAN_SEND_TIMEOUT_MS milliseconds.
  *
+ * If the semaphore times out, the frame may still be pending in the
+ * driver's TX queue.  A generation counter is used so that any late
+ * callback from a timed-out frame is safely discarded.
+ *
+ * @note This function is NOT thread-safe. It must only be called from
+ *       a single thread context (the main thread in this application).
+ *
  * @param frame Pointer to the CAN frame to transmit.
- * @return 0 on success, negative errno on failure or timeout.
+ * @return 0 on success, -EINVAL if @p frame is NULL,
+ *         -EAGAIN on timeout, or another negative errno on failure.
  */
 static int can_send_frame_with_timeout(struct can_frame *frame)
 {
         int ret;
+
+        if (frame == NULL) {
+                return -EINVAL;
+        }
 
         /* Advance generation so any stale callback is discarded */
         tx_generation++;
@@ -371,16 +432,33 @@ static int can_send_frame_with_timeout(struct can_frame *frame)
  *
  * Called when the controller is in bus-off or stopped state.
  * Stops the controller (tolerating -EALREADY if already stopped),
- * waits for @ref CAN_RECOVERY_DELAY_MS, then restarts it.
- * Logs success or failure.
+ * waits, then restarts it.
+ *
+ * The wait duration uses a two-level backoff: the first
+ * @ref CAN_RECOVERY_MAX_RETRIES attempts wait @ref CAN_RECOVERY_DELAY_MS;
+ * subsequent attempts wait @ref CAN_RECOVERY_BACKOFF_MS.  The failure
+ * counter is reset to zero on a successful recovery.
  *
  * @return 0 on success, negative errno on failure.
  */
 static int can_recover_controller(void)
 {
         int ret;
+        uint32_t delay;
 
-        LOG_WRN("Attempting CAN controller recovery...");
+        if (recovery_fail_count < UINT32_MAX) {
+                recovery_fail_count++;
+        }
+
+        if (recovery_fail_count > CAN_RECOVERY_MAX_RETRIES) {
+                delay = CAN_RECOVERY_BACKOFF_MS;
+                LOG_WRN("Recovery attempt %u (backoff %u ms)",
+                        recovery_fail_count, delay);
+        } else {
+                delay = CAN_RECOVERY_DELAY_MS;
+                LOG_WRN("Attempting CAN controller recovery (%u/%u)...",
+                        recovery_fail_count, CAN_RECOVERY_MAX_RETRIES);
+        }
 
         ret = can_stop(can_dev);
         if (ret != 0 && ret != -EALREADY) {
@@ -388,7 +466,7 @@ static int can_recover_controller(void)
                 return ret;
         }
 
-        k_msleep(CAN_RECOVERY_DELAY_MS);
+        k_msleep(delay);
 
         ret = can_start(can_dev);
         if (ret != 0) {
@@ -396,7 +474,9 @@ static int can_recover_controller(void)
                 return ret;
         }
 
-        LOG_INF("CAN controller recovery succeeded");
+        LOG_INF("CAN controller recovery succeeded after %u attempt(s)",
+                recovery_fail_count);
+        recovery_fail_count = 0;
         return 0;
 }
 
@@ -414,13 +494,15 @@ static int can_recover_controller(void)
  *    - Builds and transmits a CAN frame.
  *    - Prints statistics every 10 frames.
  *
- * @return 0 (never reached under normal operation).
+ * @return Does not return under normal operation.
  */
 int main(void)
 {
         int ret;
         uint16_t counter = 0;
-        uint16_t last_stats_counter = 0;
+        uint32_t last_stats_tx_count = 0;
+        uint32_t consecutive_tx_errors = 0;
+        struct can_frame tx_frame;
 
         LOG_INF("CAN sample application starting...");
 
@@ -428,14 +510,15 @@ int main(void)
         ret = can_device_init();
         if (ret != 0) {
                 LOG_ERR("CAN initialisation failed - halting");
-                return ret;
+                goto halt;
         }
+        current_can_state = CAN_STATE_ERROR_ACTIVE;
 
         /* ----- Register RX filter ----- */
         ret = can_setup_rx_filter();
         if (ret < 0) {
                 LOG_ERR("RX filter setup failed - halting");
-                return ret;
+                goto halt;
         }
 
         LOG_INF("Entering main TX loop (interval=%d ms)", CAN_TX_INTERVAL_MS);
@@ -444,9 +527,12 @@ int main(void)
         while (1) {
                 k_msleep(CAN_TX_INTERVAL_MS);
 
+                /* Snapshot the current CAN state for this iteration */
+                enum can_state state_snapshot = current_can_state;
+
                 /* Handle bus-off or stopped condition */
-                if (current_can_state == CAN_STATE_BUS_OFF ||
-                    current_can_state == CAN_STATE_STOPPED) {
+                if (state_snapshot == CAN_STATE_BUS_OFF ||
+                    state_snapshot == CAN_STATE_STOPPED) {
                         ret = can_recover_controller();
                         if (ret != 0) {
                                 LOG_ERR("Controller recovery failed; retrying next cycle");
@@ -455,26 +541,40 @@ int main(void)
                 }
 
                 /* Build and send a CAN frame */
-                struct can_frame tx_frame;
-
                 can_build_tx_frame(&tx_frame, counter);
 
                 ret = can_send_frame_with_timeout(&tx_frame);
                 if (ret == 0) {
                         LOG_INF("TX: ID=0x%03X counter=%u", CAN_TX_MSG_ID, counter);
                         counter++;
+                        consecutive_tx_errors = 0;
                 } else {
-                        LOG_ERR("TX failed (err %d)", ret);
+                        consecutive_tx_errors++;
+                        LOG_ERR("TX failed (err %d, consecutive=%u)",
+                                ret, consecutive_tx_errors);
+                        if (consecutive_tx_errors > 0U &&
+                            (consecutive_tx_errors % CAN_TX_ERR_BURST_THRESHOLD) == 0U) {
+                                LOG_WRN("TX error burst: %u consecutive failures",
+                                        consecutive_tx_errors);
+                        }
                 }
 
-                /* Print statistics every 10 successful frames (once) */
-                if (counter > 0 && (counter % 10) == 0 &&
-                    counter != last_stats_counter) {
-                        last_stats_counter = counter;
+                /* Print statistics every STATS_PRINT_INTERVAL successful frames */
+                uint32_t tx_snap = tx_count;
+
+                if (tx_snap > 0U &&
+                    (tx_snap % STATS_PRINT_INTERVAL) == 0U &&
+                    tx_snap != last_stats_tx_count) {
+                        last_stats_tx_count = tx_snap;
                         LOG_INF("Stats: TX=%u RX=%u TX_ERR=%u",
-                                tx_count, rx_count, tx_error_count);
+                                tx_snap, rx_count, tx_error_count);
                 }
         }
 
-        return 0;
+halt:
+        LOG_ERR("Fatal error (err %d) - system halted", ret);
+        while (1) {
+                k_msleep(1000);
+        }
+        return 0; /* unreachable */
 }
